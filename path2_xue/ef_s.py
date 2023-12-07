@@ -13,6 +13,7 @@ from shapely.geometry import Point
 classification_name = 'None'  # classification_name是全局变量，根据is_inside_annotation_center的判断给对应的patch的赋值lable
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
+
 # 加载ResNet-50预训练模型
 model = models.resnet50(pretrained=True)
 model.eval()  # 设置为评估模式，以便不影响Batch Normalization层的统计信息
@@ -23,6 +24,9 @@ transform = transforms.Compose([
     transforms.ToTensor(),
 ])
 
+# 设定数据集
+wsi_folder = 'data/wsi'
+annotation_folder = 'data/annotation'
 
 def is_background(start_x, start_y, level, patch_size, slide):
     # 定义背景颜色阈值
@@ -76,9 +80,6 @@ class_labels = {
     'None': 3
 }
 
-# 提取保存病理文件patch的特征张量
-wsi_folder = 'data/wsi'
-annotation_folder = 'data/annotation'
 
 # 获取wsi文件夹中所有bif和svs文件的路径
 wsi_files = [f for f in os.listdir(wsi_folder) if f.endswith(('.bif', '.svs'))]
@@ -111,11 +112,21 @@ for wsi_file in wsi_files:
             for y in range(0, slide.level_dimensions[resolution_level][1], patch_size[1]):
                 patch_box = (x, y, x + patch_size[0], y + patch_size[1])
 
-                # 判断是否与先前提取的视野框重叠
+                # 计算中心坐标
+                center_x = (x + x + patch_size[0]) / 2
+                center_y = (y + y + patch_size[1]) / 2
+
+                # 判断是否与先前提取的视野框重叠，要求横向或纵向上的偏移正好等于20像素
                 overlap = False
-                for existing_box in extracted_coordinates:
-                    if (patch_box[0] < existing_box[2] and patch_box[2] > existing_box[0] and
-                            patch_box[1] < existing_box[3] and patch_box[3] > existing_box[1]):
+                for existing_center in extracted_coordinates:
+                    existing_x, existing_y = existing_center
+                    overlap_threshold = 20  # 允许的偏移阈值
+
+                    # 计算横向和纵向上的偏移
+                    x_offset = abs(existing_x - center_x)
+                    y_offset = abs(existing_y - center_y)
+
+                    if x_offset <= overlap_threshold and y_offset <= overlap_threshold:
                         overlap = True
                         break
 
@@ -149,13 +160,13 @@ for wsi_file in wsi_files:
                                 else:
                                     print("未找到匹配的键")
 
-                                # 构建文件名并保存为 .pt 文件
-                                file_name = f'{thisclass}_{label}_{wsi_file}_resolution_{resolution_level}_{x}_{y}.pt'
+                                # 构建文件名并保存为 .pt 文件，使用中心坐标
+                                file_name = f'{thisclass}_{label}_{wsi_file}_resolution_{resolution_level}_{int(center_x)}_{int(center_y)}.pt'
                                 file_path = os.path.join(folder_name, file_name)
                                 torch.save(feature_tensor, file_path)
 
                                 # 记录已保存的坐标
-                                extracted_coordinates.append(patch_box)
+                                extracted_coordinates.append((center_x, center_y))
                                 saved_coordinates.append((x, y))
 
                                 print(
@@ -187,13 +198,13 @@ for wsi_file in wsi_files:
                             else:
                                 print("未找到匹配的键")
 
-                            # 构建文件名并保存为 .pt 文件
-                            file_name = f'{thisclass}_{label}_{wsi_file}_resolution_{resolution_level}_{x}_{y}.pt'
+                            # 构建文件名并保存为 .pt 文件，使用中心坐标
+                            file_name = f'{thisclass}_{label}_{wsi_file}_resolution_{resolution_level}_{int(center_x)}_{int(center_y)}.pt'
                             file_path = os.path.join(folder_name, file_name)
                             torch.save(feature_tensor, file_path)
 
                             # 记录已保存的坐标
-                            extracted_coordinates.append(patch_box)
+                            extracted_coordinates.append((center_x, center_y))
                             saved_coordinates.append((x, y))
 
                             print(f"Saved patch at {x}, {y} at resolution level {resolution_level} - Label: {label}")
