@@ -4,12 +4,16 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split, Dataset
 import torch.nn.functional as F
+from tqdm import tqdm
+import numpy as np
 from datetime import datetime
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report
+import logging
 
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 # Assuming your tensor has a feature size of 2048
+# feature_size = 2048
 feature_size = 1000
 num_classes = 3
 class_labels = {
@@ -59,7 +63,7 @@ model.to(device)
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-root_folder = '/Users/tanxinyu/毛母质瘤/datasets'
+root_folder = '/path/to/datasets'  # Update the path
 resolutions = [0, 1, 2]
 
 transform = None
@@ -68,11 +72,21 @@ train_ratio = 0.7
 val_ratio = 0.2
 test_ratio = 0.1
 
+# Set up logging
+log_file = '/path/to/logs/train_log.txt'  # Update the path
+
+logging.basicConfig(filename=log_file, level=logging.INFO, format='%(asctime)s [%(levelname)s]: %(message)s',
+                    datefmt='%Y-%m-%d %H:%M:%S')
+logging.info(f"Training started at {datetime.now()}")
+print(f"Training started at {datetime.now()}")  # Added print statement
+
 for resolution_level in resolutions:
     folder_name = f'window_images_resolution_{resolution_level}'
     folder_path = os.path.join(root_folder, folder_name)
     dataset = CustomDataset(folder_path, transform=None)
-    print(f'start training {folder_name}')
+    logging.info(f"Start training {folder_name}")
+    print(f"Start training {folder_name}")  # Added print statement
+
     num_samples = len(dataset)
     num_train = int(train_ratio * num_samples)
     num_val = int(val_ratio * num_samples)
@@ -88,81 +102,67 @@ for resolution_level in resolutions:
 
     for epoch in range(num_epochs):
         model.train()
-        total_correct = 0
-        total_samples = 0
+        epoch_train_loss = np.array([])
+        epoch_train_accuracy = np.array([])
 
-        for features, labels, classification_name in train_dataloader:
-            features = features.to(device)
-            labels = labels.to(device)
+        with tqdm(total=num_train, desc=f'Epoch {epoch + 1}/{num_epochs}', unit='tensor') as pbar:
+            for features, labels, classification_name in train_dataloader:
+                features = features.to(device)
+                labels = labels.to(device)
 
-            # Forward pass
-            outputs = model(features)
-            supervised_loss = criterion(outputs, labels)
+                optimizer.zero_grad()
 
-            # Calculate classification_name dynamically
+                outputs = model(features)
+                supervised_loss = criterion(outputs, labels)
 
-            with torch.no_grad():
-                predicted_labels = torch.argmax(outputs, dim=1)
-                predicted_probabilities = F.softmax(outputs, dim=1)
+                # Your self-supervised label assignment logic here...
+                if classification_name == 'none':
+                    with torch.no_grad():
+                        # Forward pass to get predicted labels
+                        predicted_labels = torch.argmax(model(features), dim=1)
+                    self_supervised_loss = F.cross_entropy(outputs, predicted_labels)
+                else:
+                    self_supervised_loss = 0.0
+                loss = model.supervised_weight * supervised_loss + model.self_supervised_weight * self_supervised_loss
 
-            # Choose the class with the highest probability for classification_name
-            max_prob, max_class = torch.max(predicted_probabilities[0], dim=0)
-            classification_name = 'none' if max_class.item() == 0 else 'other'
+                loss.backward()
+                optimizer.step()
 
-            # Self-supervised label assignment
-            if classification_name == 'none':
-                with torch.no_grad():
-                    # Forward pass to get predicted labels
-                    predicted_labels = torch.argmax(model(features), dim=1)
-                self_supervised_loss = F.cross_entropy(outputs, predicted_labels)
-            else:
-                self_supervised_loss = 0.0
+                _, predicted = torch.max(outputs, 1)
+                accuracy = accuracy_score(labels.cpu().numpy(), predicted.cpu().numpy())
 
-            # Calculate mixed loss
-            loss = model.supervised_weight * supervised_loss + model.self_supervised_weight * self_supervised_loss
+                epoch_train_loss = np.append(epoch_train_loss, loss.item())
+                epoch_train_accuracy = np.append(epoch_train_accuracy, accuracy)
 
-            # Backward pass and optimization
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+                pbar.set_postfix(loss=loss.item(), accuracy=accuracy)
+                pbar.update(features.size(0))
 
-            # Calculate accuracy
-            _, predicted = torch.max(outputs, 1)
-            total_samples += labels.size(0)
-            total_correct += (predicted == labels).sum().item()
+        avg_train_loss = np.mean(epoch_train_loss)
+        avg_train_accuracy = np.mean(epoch_train_accuracy)
 
-        train_accuracy = total_correct / total_samples
+        # Validation
+        model.eval()
+        epoch_val_accuracy = np.array([])
 
-        # Evaluate on validation set after each epoch
         with torch.no_grad():
-            total_correct = 0
-            total_samples = 0
             for features, labels, _ in val_dataloader:
                 features = features.to(device)
                 labels = labels.to(device)
-                # Forward pass
+
                 outputs = model(features)
-                # Calculate accuracy
                 _, predicted = torch.max(outputs, 1)
-                total_samples += labels.size(0)
-                total_correct += (predicted == labels).sum().item()
+                accuracy = accuracy_score(labels.cpu().numpy(), predicted.cpu().numpy())
 
-            accuracy = total_correct / total_samples
-            print(
-                f'Epoch {epoch + 1}/{num_epochs}, Loss: {loss.item():.4f}, Train Accuracy: {train_accuracy:.4f}, Validation Accuracy: {accuracy:.4f}')
+                epoch_val_accuracy = np.append(epoch_val_accuracy, accuracy)
 
-    # Save the pre-trained model
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    acc_percentage = round(accuracy * 100, 2)
-    model_name = f'resnet50_{timestamp}_{acc_percentage}_{epoch}.pth'
-    model_save_path = os.path.join('model', model_name)
+        avg_val_accuracy = np.mean(epoch_val_accuracy)
 
-    # Create the directory if it doesn't exist
-    os.makedirs('model', exist_ok=True)
-
-    torch.save(model.state_dict(), model_save_path)
-    print(f'Model saved at: {model_save_path}')
-
+        logging.info(
+            f'Epoch {epoch + 1}/{num_epochs}, Avg Train Loss: {avg_train_loss:.4f}, Avg Train Accuracy: {avg_train_accuracy:.4f}, Avg Validation Accuracy: {avg_val_accuracy:.4f}')
+        print(
+            f'Epoch {epoch + 1}/{num_epochs}, Avg Train Loss: {avg_train_loss:.4f}, Avg Train Accuracy: {avg_train_accuracy:.4f}, Avg Validation Accuracy: {avg_val_accuracy:.4f}')  # Added print statement
+    print("Training complete!")  # Added print statement
+    logging.info("Training complete!")
 # Evaluate on the test set after training completes
 model.eval()
 with torch.no_grad():
@@ -175,9 +175,7 @@ with torch.no_grad():
         features = features.to(device)
         labels = labels.to(device)
 
-        # Forward pass
         outputs = model(features)
-        # Calculate accuracy
         _, predicted = torch.max(outputs, 1)
         total_samples += labels.size(0)
         total_correct += (predicted == labels).sum().item()
@@ -187,14 +185,21 @@ with torch.no_grad():
 
     accuracy = total_correct / total_samples
     print(f'Test Accuracy: {round(accuracy * 100, 3)}%')
+    logging.info(f'Test Accuracy: {round(accuracy * 100, 3)}%')
+    print(f'Test Accuracy: {round(accuracy * 100, 3)}%')  # Added print statement
 
-    # 计算其他指标
     precision = precision_score(y_true, y_pred, average='weighted')
     recall = recall_score(y_true, y_pred, average='weighted')
     f1 = f1_score(y_true, y_pred, average='weighted')
 
     print(f'Precision: {round(precision, 3)}, Recall: {round(recall, 3)}, F1 Score: {round(f1, 3)}')
+    logging.info(f'Precision: {round(precision, 3)}, Recall: {round(recall, 3)}, F1 Score: {round(f1, 3)}')
+    print(
+        f'Precision: {round(precision, 3)}, Recall: {round(recall, 3)}, F1 Score: {round(f1, 3)}')  # Added print statement
 
-    # 输出分类报告
-    print("Classification Report:")
-    print(classification_report(y_true, y_pred))
+    logging.info("Classification Report:")
+    logging.info(classification_report(y_true, y_pred))
+    print(f'Classification Report:\n'
+          f'{classification_report(y_true, y_pred)}')
+
+
